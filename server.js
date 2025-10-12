@@ -165,7 +165,8 @@ app.get('/oauth/callback', async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000 
     });
 
-    res.redirect('/');
+    // ✅ เปลี่ยนเส้นทางไปที่ Accounts Table ทันที
+    res.redirect('/accounts/table');
     
   } catch (error) {
     console.error('OAuth Token Error:', error);
@@ -214,8 +215,10 @@ app.get('/', requireAuth, (req, res) => {
       <div class="user-info">
         <h3>👤 User Information</h3>
         <p><strong>User ID:</strong> ${user.id}</p>
-        <p><strong>Username:</strong> ${user.username}</p>
+        <p><strong>Username:</strong> ${user.username || 'N/A'}</p>
+        <p><strong>Email:</strong> ${user.email || 'N/A'}</p>
         <p><strong>Organization ID:</strong> ${user.organizationId}</p>
+        <p><strong>Display Name:</strong> ${user.display_name || 'N/A'}</p>
         <p><strong>Login Time:</strong> ${new Date().toLocaleString()}</p>
       </div>
       
@@ -288,44 +291,51 @@ app.get('/accounts/table', requireAuth, async (req, res) => {
          </div>`
       : '';
 
-    res.send(`
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Accounts Table</title>
-        <style>
-          body { font-family: Arial; max-width: 1200px; margin: 0 auto; padding: 20px; }
-          table { border-collapse: collapse; width: 100%; margin-top: 20px; }
-          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-          th { background-color: #f2f2f2; }
-        </style>
-      </head>
-      <body>
-        <div style="display: flex; justify-content: space-between; align-items: center;">
-          <h2>Accounts</h2>
-          <form style="display:inline" method="post" action="/logout">
-            <button type="submit" style="background:#dc3545;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
-              Logout
-            </button>
-          </form>
-        </div>
-        ${banner}
-        <form>
-          <input name="q" placeholder="Search name…" value="${search}">
-          <input name="limit" type="number" value="${limit}" min="1" max="200">
-          <button>Search</button>
-          <a href="/accounts/new" style="margin-left: 20px;">+ New Account</a>
-          <a href="/" style="margin-left: 20px;">← Back to Home</a>
+// ในส่วน HTML ของ /accounts/table
+res.send(`
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Accounts Table</title>
+    <style>
+      body { font-family: Arial; max-width: 1200px; margin: 0 auto; padding: 20px; }
+      table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+      th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+      th { background-color: #f2f2f2; }
+      .header-buttons { display: flex; gap: 10px; margin-bottom: 20px; }
+      .btn { 
+        background: #0176d3; color: white; padding: 8px 16px; 
+        text-decoration: none; border-radius: 4px; display: inline-block; 
+      }
+      .btn-logout { background: #dc3545; }
+    </style>
+  </head>
+  <body>
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+      <h2>Accounts Table</h2>
+      <div class="header-buttons">
+        <a href="/" class="btn">🏠 Dashboard</a>
+        <form style="display:inline" method="post" action="/logout">
+          <button type="submit" class="btn btn-logout">🚪 Logout</button>
         </form>
-        <table>
-          <thead><tr>
-            <th>Id</th><th>Name</th><th>Type</th><th>Industry</th><th>Created</th><th>Actions</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
-      </body>
-      </html>
-    `);
+      </div>
+    </div>
+    ${banner}
+    <form>
+      <input name="q" placeholder="Search name…" value="${search}">
+      <input name="limit" type="number" value="${limit}" min="1" max="200">
+      <button>Search</button>
+      <a href="/accounts/new" style="margin-left: 20px;">+ New Account</a>
+    </form>
+    <table>
+      <thead><tr>
+        <th>Id</th><th>Name</th><th>Type</th><th>Industry</th><th>Created</th><th>Actions</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </body>
+  </html>
+`);
   } catch (error) {
     res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
