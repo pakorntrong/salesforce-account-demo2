@@ -1,5 +1,5 @@
 {
-  "name": "salesforce-account-demo",
+  "name": "salesforce-account-demo2",
   "version": "1.0.0",
   "description": "Local demo: Node.js + jsforce to fetch Accounts without Connected App (username+password+token).",
   "main": "server.js",
@@ -7,8 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
     "jsforce": "^3.10.8"
   }
 }

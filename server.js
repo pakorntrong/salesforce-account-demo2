@@ -1,71 +1,258 @@
 const express = require('express');
 const jsforce = require('jsforce');
+const cookieParser = require('cookie-parser');
+const crypto = require('crypto');
 require('dotenv').config();
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(cookieParser());
+
+// ==================== ENVIRONMENT VARIABLES ====================
 const {
-  SF_USERNAME,
-  SF_PASSWORD,
-  SF_TOKEN,
-  SF_LOGIN_URL = 'https://login.salesforce.com'
+  SF_CLIENT_ID,
+  SF_CLIENT_SECRET,
+  SF_LOGIN_URL = 'https://login.salesforce.com',
+  APP_BASE_URL = 'http://localhost:3000'
 } = process.env;
 
-app.use(express.urlencoded({ extended: true })); // รับ form POST
-app.use(express.json());                          // รับ JSON
-
-if (!SF_USERNAME || !SF_PASSWORD || !SF_TOKEN) {
-  console.warn('⚠️  Please set SF_USERNAME, SF_PASSWORD, SF_TOKEN in .env');
+// ==================== PKCE FUNCTIONS ====================
+function generateCodeVerifier() {
+  return crypto.randomBytes(32).toString('base64url');
 }
 
-let conn;
-
-async function ensureConnection() {
-  if (conn && conn.accessToken) return conn;
-  conn = new jsforce.Connection({ loginUrl: SF_LOGIN_URL });
-  await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
-  return conn;
+function generateCodeChallenge(codeVerifier) {
+  return crypto.createHash('sha256')
+    .update(codeVerifier)
+    .digest('base64url');
 }
-app.get('*', (req, res) => {
-  console.log('Request path:', req.path);
-  res.status(404).send(`Path not found: ${req.path}`);
+
+// ==================== SESSION & OAUTH CONFIG ====================
+const sessions = {};
+const oauth2 = new jsforce.OAuth2({
+  loginUrl: SF_LOGIN_URL,
+  clientId: SF_CLIENT_ID,
+  clientSecret: SF_CLIENT_SECRET,
+  redirectUri: `${APP_BASE_URL}/oauth/callback`
 });
 
-app.get('/', async (req, res) => {
+// ==================== AUTH MIDDLEWARE ====================
+const requireAuth = (req, res, next) => {
+  const sessionId = req.cookies?.sessionId;
+  const session = sessions[sessionId];
+  
+  if (session && session.conn && session.conn.accessToken) {
+    req.sfConn = session.conn;
+    req.userInfo = session.userInfo;
+    return next();
+  }
+  
+  res.redirect('/login');
+};
+
+// ==================== LOGIN ROUTES ====================
+app.get('/login', (req, res) => {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+  
+  const authUrl = oauth2.getAuthorizationUrl({
+    scope: 'api refresh_token',
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256'
+  });
+  
+  // เก็บ codeVerifier ใน session ชั่วคราว
+  const tempSessionId = Math.random().toString(36).substring(2);
+  sessions[tempSessionId] = {
+    codeVerifier: codeVerifier,
+    created: new Date().toISOString()
+  };
+  
+  res.cookie('tempSessionId', tempSessionId, {
+    httpOnly: true,
+    maxAge: 10 * 60 * 1000 // 10 นาที
+  });
+  
   res.send(`
-    <h2>Salesforce Demo (Accounts)</h2>
-    <ul>
-      <li><a href="/accounts">/accounts</a> – list top 10 accounts</li>
-      <li><a href="/whoami">/whoami</a> – show org & user info</li>
-    </ul>
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Login - Salesforce Demo</title>
+      <style>
+        body { font-family: Arial; max-width: 500px; margin: 50px auto; padding: 20px; }
+        .login-box { border: 1px solid #0176d3; padding: 30px; border-radius: 8px; text-align: center; }
+        .btn { background: #0176d3; color: white; padding: 12px 24px; text-decoration: none; 
+               border-radius: 4px; display: inline-block; margin: 10px; }
+        .btn:hover { background: #0160a3; }
+      </style>
+    </head>
+    <body>
+      <div class="login-box">
+        <h2>🔐 Salesforce OAuth Login</h2>
+        <p>Login using your Salesforce credentials</p>
+        <a href="${authUrl}" class="btn">Login with Salesforce</a>
+        
+        <div style="margin-top: 20px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+          <small>
+            You will be redirected to Salesforce for secure authentication
+          </small>
+        </div>
+      </div>
+    </body>
+    </html>
   `);
 });
 
-app.get('/whoami', async (req, res) => {
+// OAuth Callback
+app.get('/oauth/callback', async (req, res) => {
+  const { code, error, error_description } = req.query;
+  const tempSessionId = req.cookies?.tempSessionId;
+  
+  // ลบ temp cookie
+  res.clearCookie('tempSessionId');
+  
+  if (error) {
+    console.error('OAuth Error:', error, error_description);
+    return res.send(`
+      <h2>OAuth Error</h2>
+      <p><strong>Error:</strong> ${error}</p>
+      <p><strong>Description:</strong> ${error_description}</p>
+      <a href="/login">Back to Login</a>
+    `);
+  }
+  
+  if (!code) {
+    return res.send(`
+      <h2>Authorization Failed</h2>
+      <p>No authorization code received.</p>
+      <a href="/login">Back to Login</a>
+    `);
+  }
+
   try {
-    const c = await ensureConnection();
-    const id = await c.identity();
-    res.type('json').send(JSON.stringify(id, null, 2));
-  } catch (e) {
-    res.status(500).send(e.toString());
+    const conn = new jsforce.Connection({ oauth2 });
+    
+    // รับ codeVerifier จาก session
+    const tempSession = sessions[tempSessionId];
+    const codeVerifier = tempSession?.codeVerifier;
+    
+    // ลบ temp session
+    if (tempSessionId) {
+      delete sessions[tempSessionId];
+    }
+    
+    if (!codeVerifier) {
+      throw new Error('PKCE code verifier not found');
+    }
+    
+    // รับ access token พร้อม code verifier
+    const userInfo = await conn.authorize(code, { code_verifier: codeVerifier });
+    
+    // สร้าง session หลัก
+    const sessionId = Math.random().toString(36).substring(2);
+    sessions[sessionId] = {
+      conn: conn,
+      userInfo: userInfo,
+      loginTime: new Date().toISOString()
+    };
+
+    // set cookie
+    res.cookie('sessionId', sessionId, { 
+      httpOnly: true, 
+      maxAge: 24 * 60 * 60 * 1000 
+    });
+
+    res.redirect('/');
+    
+  } catch (error) {
+    console.error('OAuth Token Error:', error);
+    res.send(`
+      <h2>Authentication Failed</h2>
+      <pre>${error.message}</pre>
+      <a href="/login">Back to Login</a>
+    `);
   }
 });
 
-app.get('/accounts', async (req, res) => {
+// Logout
+app.post('/logout', (req, res) => {
+  const sessionId = req.cookies?.sessionId;
+  if (sessionId) {
+    delete sessions[sessionId];
+  }
+  res.clearCookie('sessionId');
+  res.redirect('/login');
+});
+
+// ==================== PROTECTED ROUTES ====================
+app.get('/', requireAuth, (req, res) => {
+  const user = req.userInfo;
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Salesforce OAuth Demo</title>
+      <style>
+        body { font-family: Arial; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ddd; padding-bottom: 20px; }
+        .user-info { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        .btn { background: #0176d3; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; display: inline-block; margin: 5px; }
+        .logout { background: #dc3545; }
+      </style>
+    </head>
+    <body>
+      <div class="header">
+        <h1>Salesforce OAuth Demo</h1>
+        <form style="display:inline" method="post" action="/logout">
+          <button type="submit" class="btn logout">Logout</button>
+        </form>
+      </div>
+      
+      <div class="user-info">
+        <h3>👤 User Information</h3>
+        <p><strong>User ID:</strong> ${user.id}</p>
+        <p><strong>Username:</strong> ${user.username}</p>
+        <p><strong>Organization ID:</strong> ${user.organizationId}</p>
+        <p><strong>Login Time:</strong> ${new Date().toLocaleString()}</p>
+      </div>
+      
+      <h3>📊 Available Actions</h3>
+      <div>
+        <a href="/accounts/table" class="btn">View Accounts Table</a>
+        <a href="/whoami" class="btn">User Details</a>
+        <a href="/accounts" class="btn">Accounts JSON</a>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+// ==================== SALESFORCE DATA ROUTES ====================
+app.get('/whoami', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    const records = await c.sobject('Account')
+    const identity = await req.sfConn.identity();
+    res.type('json').send(JSON.stringify(identity, null, 2));
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
+  }
+});
+
+app.get('/accounts', requireAuth, async (req, res) => {
+  try {
+    const accounts = await req.sfConn.sobject('Account')
       .find({}, 'Id, Name, Type, Industry, CreatedDate')
       .limit(10);
-    res.type('json').send(JSON.stringify(records, null, 2));
-  } catch (e) {
-    res.status(500).send(e.toString());
+    res.type('json').send(JSON.stringify(accounts, null, 2));
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-app.get('/accounts/table', async (req, res) => {
+app.get('/accounts/table', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
     const limit = Number(req.query.limit || 20);
     const search = req.query.q ? req.query.q.trim() : "";
     const createdId = req.query.createdId || "";
@@ -74,7 +261,7 @@ app.get('/accounts/table', async (req, res) => {
     if (search) soql += ` WHERE Name LIKE '%${search}%'`;
     soql += ` ORDER BY CreatedDate DESC LIMIT ${limit}`;
 
-    const result = await c.query(soql);
+    const result = await req.sfConn.query(soql);
 
     const rows = result.records.map(r => {
       const highlight = r.Id === createdId ? ' style="background:#fff6cc;"' : '';
@@ -102,28 +289,50 @@ app.get('/accounts/table', async (req, res) => {
       : '';
 
     res.send(`
-      <h2>Accounts</h2>
-      ${banner}
-      <form>
-        <input name="q" placeholder="Search name…" value="${search}">
-        <input name="limit" type="number" value="${limit}" min="1" max="200">
-        <button>Search</button>
-        <a href="/accounts/new">+ New</a>
-      </form>
-      <table border="1" cellpadding="6" cellspacing="0">
-        <thead><tr>
-          <th>Id</th><th>Name</th><th>Type</th><th>Industry</th><th>Created</th><th>Actions</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Accounts Table</title>
+        <style>
+          body { font-family: Arial; max-width: 1200px; margin: 0 auto; padding: 20px; }
+          table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+          th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+          th { background-color: #f2f2f2; }
+        </style>
+      </head>
+      <body>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <h2>Accounts</h2>
+          <form style="display:inline" method="post" action="/logout">
+            <button type="submit" style="background:#dc3545;color:white;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;">
+              Logout
+            </button>
+          </form>
+        </div>
+        ${banner}
+        <form>
+          <input name="q" placeholder="Search name…" value="${search}">
+          <input name="limit" type="number" value="${limit}" min="1" max="200">
+          <button>Search</button>
+          <a href="/accounts/new" style="margin-left: 20px;">+ New Account</a>
+          <a href="/" style="margin-left: 20px;">← Back to Home</a>
+        </form>
+        <table>
+          <thead><tr>
+            <th>Id</th><th>Name</th><th>Type</th><th>Industry</th><th>Created</th><th>Actions</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </body>
+      </html>
     `);
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-// ฟอร์มสร้าง
-app.get('/accounts/new', (req, res) => {
+// CRUD Routes
+app.get('/accounts/new', requireAuth, (req, res) => {
   res.send(`
     <h3>Create Account</h3>
     <form method="post" action="/accounts">
@@ -135,27 +344,23 @@ app.get('/accounts/new', (req, res) => {
   `);
 });
 
-// บันทึกสร้าง
-app.post('/accounts', async (req, res) => {
+app.post('/accounts', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    const result = await c.sobject('Account').create({
+    const result = await req.sfConn.sobject('Account').create({
       Name: req.body.Name,
       Type: req.body.Type || null,
       Industry: req.body.Industry || null
     });
     if (!result.success) throw new Error(JSON.stringify(result, null, 2));
-    // เด้งกลับตารางพร้อมไฮไลต์แถวที่เพิ่งสร้าง
     res.redirect(`/accounts/table?createdId=${result.id}`);
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-app.get('/accounts/:id', async (req, res) => {
+app.get('/accounts/:id', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    const r = await c.sobject('Account').retrieve(req.params.id);
+    const r = await req.sfConn.sobject('Account').retrieve(req.params.id);
     res.send(`
       <h2>Account Detail</h2>
       <p><b>Name:</b> ${r.Name || ''}</p>
@@ -171,16 +376,14 @@ app.get('/accounts/:id', async (req, res) => {
         <pre>${JSON.stringify(r, null, 2)}</pre>
       </details>
     `);
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-// ฟอร์มแก้ไข
-app.get('/accounts/:id/edit', async (req, res) => {
+app.get('/accounts/:id/edit', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    const r = await c.sobject('Account').retrieve(req.params.id);
+    const r = await req.sfConn.sobject('Account').retrieve(req.params.id);
     res.send(`
       <h3>Edit Account</h3>
       <form method="post" action="/accounts/${r.Id}/update">
@@ -190,16 +393,14 @@ app.get('/accounts/:id/edit', async (req, res) => {
         <button>Save</button>  <a href="/accounts/${r.Id}">Cancel</a>
       </form>
     `);
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-// บันทึกแก้ไข
-app.post('/accounts/:id/update', async (req, res) => {
+app.post('/accounts/:id/update', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    const result = await c.sobject('Account').update({
+    const result = await req.sfConn.sobject('Account').update({
       Id: req.params.id,
       Name: req.body.Name,
       Type: req.body.Type || null,
@@ -207,36 +408,31 @@ app.post('/accounts/:id/update', async (req, res) => {
     });
     if (!result.success) throw new Error(JSON.stringify(result, null, 2));
     res.redirect(`/accounts/${req.params.id}`);
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-app.post('/accounts/:id/delete', async (req, res) => {
+app.post('/accounts/:id/delete', requireAuth, async (req, res) => {
   try {
-    const c = await ensureConnection();
-    await c.sobject('Account').destroy(req.params.id);
+    await req.sfConn.sobject('Account').destroy(req.params.id);
     res.redirect('/accounts/table');
-  } catch (e) {
-    res.status(500).send(`<pre>${e.toString()}</pre>`);
+  } catch (error) {
+    res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
 
-app.get('/sf/customers', async (_req, res) => {
-  try {
-    const conn = await getSfConnection();
-    const r = await conn.query(`
-      SELECT Id, Name, Email__c, Phone__c, City__c
-      FROM Customer__c
-      ORDER BY CreatedDate DESC
-      LIMIT 50
-    `);
-    res.json(r.records);
-  } catch (e) {
-    res.status(500).json({ error: 'SF query', detail: e.message });
-  }
+// ==================== ERROR HANDLING ====================
+app.get('*', (req, res) => {
+  console.log('Request path:', req.path);
+  res.status(404).send(`Path not found: ${req.path}`);
 });
 
+// ==================== SERVER START ====================
 app.listen(PORT, () => {
-  console.log(`👉 Listening on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on ${APP_BASE_URL}`);
+  console.log(`👉 Login URL: ${APP_BASE_URL}/login`);
+  console.log('🔧 Environment Check:');
+  console.log('SF_CLIENT_ID:', SF_CLIENT_ID ? '✅ Set' : '❌ Missing');
+  console.log('SF_CLIENT_SECRET:', SF_CLIENT_SECRET ? '✅ Set' : '❌ Missing');
 });
