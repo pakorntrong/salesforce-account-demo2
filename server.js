@@ -26,6 +26,10 @@ async function ensureConnection() {
   await conn.login(SF_USERNAME, SF_PASSWORD + SF_TOKEN);
   return conn;
 }
+app.get('*', (req, res) => {
+  console.log('Request path:', req.path);
+  res.status(404).send(`Path not found: ${req.path}`);
+});
 
 app.get('/', async (req, res) => {
   res.send(`
@@ -218,6 +222,20 @@ app.post('/accounts/:id/delete', async (req, res) => {
   }
 });
 
+app.get('/sf/customers', async (_req, res) => {
+  try {
+    const conn = await getSfConnection();
+    const r = await conn.query(`
+      SELECT Id, Name, Email__c, Phone__c, City__c
+      FROM Customer__c
+      ORDER BY CreatedDate DESC
+      LIMIT 50
+    `);
+    res.json(r.records);
+  } catch (e) {
+    res.status(500).json({ error: 'SF query', detail: e.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`👉 Listening on http://localhost:${PORT}`);
