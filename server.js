@@ -466,6 +466,36 @@ app.post('/accounts/:id/delete', requireAuth, async (req, res) => {
     res.status(500).send(`<pre>${error.toString()}</pre>`);
   }
 });
+// ==================== SALESFORCE WEBHOOK: /notify ====================
+// Endpoint ที่ Salesforce Flow/Apex จะเรียกมา เมื่อมี record ใหม่
+app.post('/notify', async (req, res) => {
+  try {
+    console.log('📩 Received from Salesforce:', req.body);
+
+    // ดึงข้อมูลจาก payload
+    const { Id, Name, Email, CreatedDate, CreatedBy } = req.body || {};
+
+    // สร้างข้อความที่จะส่งไป LINE
+    const message =
+      `📢 Salesforce Notification\n` +
+      `🆕 New Record Created\n` +
+      `• Name: ${Name || '-'}\n` +
+      `• Id: ${Id || '-'}\n` +
+      (Email ? `• Email: ${Email}\n` : '') +
+      (CreatedDate ? `• Created: ${CreatedDate}\n` : '') +
+      (CreatedBy ? `• CreatedBy: ${CreatedBy}\n` : '');
+
+    // ส่งไปยัง LINE
+    await sendLineNotify(message);
+
+    console.log('✅ LINE notification sent successfully');
+    res.json({ ok: true, sent: message });
+
+  } catch (error) {
+    console.error('❌ Notify Error:', error);
+    res.status(500).json({ ok: false, error: error.toString() });
+  }
+});
 
 // ==================== ERROR HANDLING ====================
 app.get('*', (req, res) => {
