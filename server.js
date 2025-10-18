@@ -1,3 +1,4 @@
+const fetch = require('node-fetch');
 const express = require('express');
 const jsforce = require('jsforce');
 const cookieParser = require('cookie-parser');
@@ -18,6 +19,37 @@ const {
   SF_LOGIN_URL = 'https://login.salesforce.com',
   APP_BASE_URL = 'http://localhost:3000'
 } = process.env;
+
+// ============= LINE Notification Function =============
+
+
+async function sendLineNotify(message) {
+  try {
+    const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+    if (!token) {
+      console.error("❌ Missing LINE_CHANNEL_ACCESS_TOKEN in .env");
+      return;
+    }
+
+    const res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        to: process.env.LINE_USER_ID, // ใส่ user id ที่จะรับข้อความ
+        messages: [{ type: "text", text: message }]
+      })
+    });
+
+    const data = await res.json();
+    if (!res.ok) console.error("LINE Push Error:", data);
+    else console.log("✅ LINE sent:", message);
+  } catch (err) {
+    console.error("LINE Notify Error:", err);
+  }
+}
 
 // ==================== PKCE FUNCTIONS ====================
 function generateCodeVerifier() {
@@ -362,6 +394,9 @@ app.post('/accounts', requireAuth, async (req, res) => {
       Industry: req.body.Industry || null
     });
     if (!result.success) throw new Error(JSON.stringify(result, null, 2));
+    // ✅ แจ้ง LINE ว่ามีการสร้าง Account ใหม่
+    const msg = `🆕 Created Account: ${req.body.Name} (${result.id})`;
+    await sendLineNotify(msg);
     res.redirect(`/accounts/table?createdId=${result.id}`);
   } catch (error) {
     res.status(500).send(`<pre>${error.toString()}</pre>`);

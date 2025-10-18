@@ -10,6 +10,7 @@
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
-    "jsforce": "^3.10.8"
+    "jsforce": "^3.10.8",
+    "node-fetch": "^2.7.0"
   }
 }
