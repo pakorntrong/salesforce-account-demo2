@@ -477,7 +477,7 @@ app.post('/notify', async (req, res) => {
 
     // helper สร้างข้อความจาก record เดี่ยว
     function makeMessageForRecord(rec) {
-      const ev = (rec.Event || rec.event || '').toString() || 'changed';
+      const ev = (rec.Event || rec.event || '').toString() ;
       const id = rec.Id || rec.id || '-';
       const name = rec.Name || rec.name || '-';
       const email = rec.Email || rec.email || rec.Email__c || rec.email__c || '';
