@@ -467,30 +467,50 @@ app.post('/accounts/:id/delete', requireAuth, async (req, res) => {
   }
 });
 // ==================== SALESFORCE WEBHOOK: /notify ====================
-// Endpoint ที่ Salesforce Flow/Apex จะเรียกมา เมื่อมี record ใหม่
+// Endpoint ที่ Salesforce Flow/Apex จะเรียกมา เมื่อมี record ใหม่/แก้ไข/ลบ
 app.post('/notify', async (req, res) => {
   try {
-    console.log('📩 Received from Salesforce:', req.body);
+    console.log('📩 /notify called. Content-Type:', req.headers['content-type']);
+    console.log('📩 Raw body:', JSON.stringify(req.body).slice(0, 2000)); // log เบื้องต้น (truncate ถ้ายาว)
 
-    // ดึงข้อมูลจาก payload
-    const { Id, Name, Email, CreatedDate, CreatedBy } = req.body || {};
+    const payload = req.body;
 
-    // สร้างข้อความที่จะส่งไป LINE
-    const message =
-      `📢 Salesforce Notification\n` +
-      `🆕 New Record Created\n` +
-      `• Name: ${Name || '-'}\n` +
-      `• Id: ${Id || '-'}\n` +
-      (Email ? `• Email: ${Email}\n` : '') +
-      (CreatedDate ? `• Created: ${CreatedDate}\n` : '') +
-      (CreatedBy ? `• CreatedBy: ${CreatedBy}\n` : '');
+    // helper สร้างข้อความจาก record เดี่ยว
+    function makeMessageForRecord(rec) {
+      const ev = (rec.Event || rec.event || '').toString() || 'changed';
+      const id = rec.Id || rec.id || '-';
+      const name = rec.Name || rec.name || '-';
+      const email = rec.Email || rec.email || rec.Email__c || rec.email__c || '';
+      const created = rec.CreatedDate || rec.createdDate || '';
 
-    // ส่งไปยัง LINE
-    await sendLineNotify(message);
+      let msg = `📢 Salesforce Notification\n`;
+      msg += `🆔 Event: ${ev.toUpperCase()}\n`;
+      msg += `• Name: ${name}\n`;
+      msg += `• Id: ${id}\n`;
+      if (email) msg += `• Email: ${email}\n`;
+      if (created) msg += `• Created: ${created}\n`;
+      return msg;
+    }
 
-    console.log('✅ LINE notification sent successfully');
-    res.json({ ok: true, sent: message });
-
+    // ฟังก์ชันส่ง HTTP ไปยัง LINE (ใช้ sendLineNotify ของคุณ)
+    // ถ้าต้องการ throttle/parallel สามารถปรับได้
+    if (Array.isArray(payload)) {
+      // ส่งทีละรายการ (sequential) — ปลอดภัย ถ้าจำนวนไม่เยอะ
+      for (const rec of payload) {
+        const message = makeMessageForRecord(rec);
+        await sendLineNotify(message);
+        console.log('✅ LINE sent for', rec.Id || rec.Name || '(no id)');
+      }
+      res.json({ ok: true, sent: payload.length + ' messages' });
+    } else if (payload && typeof payload === 'object') {
+      const message = makeMessageForRecord(payload);
+      await sendLineNotify(message);
+      console.log('✅ LINE sent for single record', payload.Id || payload.Name || '(no id)');
+      res.json({ ok: true, sent: 1 });
+    } else {
+      console.warn('⚠️ Unknown payload format:', typeof payload);
+      res.status(400).json({ ok: false, error: 'Unknown payload format' });
+    }
   } catch (error) {
     console.error('❌ Notify Error:', error);
     res.status(500).json({ ok: false, error: error.toString() });
